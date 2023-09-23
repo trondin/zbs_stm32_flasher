@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+doc/
+lib/
+test/
+*.zip
+

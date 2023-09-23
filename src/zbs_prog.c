@@ -1,4 +1,5 @@
 #include <stm32f1xx.h>
+#include "system_interrupts.h"
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -10,7 +11,6 @@
 #include "zbs_prog.h"
 
 uint32_t FLASHER_VERSION = 0x00000020;
-
 
 typedef enum
 {
@@ -88,7 +88,7 @@ typedef enum
 #define MOSI_L MOSI_PORT->BRR = 1 << MOSI_PIN; 
 #define MOSI_H MOSI_PORT->BSRR = 1 << MOSI_PIN;  
 
-
+volatile uint8_t TimeoutFlag;  
 
 __attribute__((noinline)) static void cdc_shell_write_string(const char *buf)
 {
@@ -125,10 +125,12 @@ void delay_us(uint16_t time)
 
 void start_timeout(void)
 {
+  TimeoutFlag  = 0;
   TIM3->PSC = SystemCoreClock/10000-1;   // 0.1ms    
-  TIM3->ARR =  5000;  // 500ms
+  ////TIM3->ARR =  5000;  // 500ms
+  //TIM3->CR1 = 0; 
+  TIM3->ARR =  1000;  // 100ms
   TIM3->CNT =0;
-  TIM3->CR1 = 0; 
   TIM3->SR = 0;  // Clear the update event flag 
   TIM3->DIER |= TIM_DIER_UIE;  
   TIM3->CR1 |= TIM_CR1_CEN ;   // Start the timer counter  
@@ -145,57 +147,6 @@ void test(void)
     CLK_L    
     delay_ms(1);
   }
-}
-*/
-/*
-void SPI_init(uint8_t speed_code)  // 0-fast, otherwise slow
-{ 
-
-  for(uint8_t i=0; i<4; i++)
-  {
-    CLK_H  
-    delay_ms(5);
-    CLK_L    
-    delay_ms(5);
-  }
-
-
-  RCC->APB2ENR |= RCC_APB2ENR_AFIOEN;
-  RCC->APB2ENR |= RCC_APB2ENR_SPI1EN | RCC_APB2ENR_IOPAEN;
- 
-  GPIOA->CRL &= ~(GPIO_CRL_CNF5 | GPIO_CRL_MODE5 |
-                  GPIO_CRL_CNF6 | GPIO_CRL_MODE6 |
-                  GPIO_CRL_CNF7 | GPIO_CRL_MODE7);
- 
-  GPIOA->CRL |=   0xB << (5 << 2);    // setup SCK PA5 pin, Mode(11b), Cnf(10b)
-  GPIOA->CRL |=   0xB << (7 << 2);    // setup MOSI PA7 pin, Mode(11b), Cnf(10b)
-  INIT_MISO_IN    // setup MISO PA6 pin, Mode(00b), Cnf(01b)
-  INIT_SS_OUT   // setup SS PA4
-  SS_H
- 
-  SPI1->CR1  = 0x0000;
-  SPI1->CR2  = 0x0000;
-  SPI1->CR1 |= SPI_CR1_MSTR;   // master
-  //SPI1->CR1 |= SPI_CR1_SSM | SPI_CR1_SSI;  // software SS
-  // we need 8 of 1 mHz
-  if (speed_code) SPI1->CR1 |= SPI_CR1_BR_0| SPI_CR1_BR_2;  // fPCLK/64 = 1.1MHz  
-  else            SPI1->CR1 |= SPI_CR1_BR_1;  // fPCLK/8 = 9MHz  
-  //SPI1->CR1 |= SPI_CR1_CPHA |SPI1->CR1 |= SPI_CR1_CPOL;  //???
-  // enable SPI
-  SPI1->CR1 |= SPI_CR1_SPE;
-}
-*/
-/*
-void SPI_off(void)
-{
-  INIT_SS_OUT 
-  INIT_CLK_OUT 
-  INIT_MOSI_OUT 
-  INIT_MISO_IN   
-  MOSI_H
-  SS_H
-  CLK_L
-
 }
 */
 
@@ -226,15 +177,15 @@ void zbs_prog_init()
 {
   // SysTick_Config(SystemCoreClock/1000); // set tick to every 1ms
   RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;  
- 
   TIM2->CR1 = 0; //TIM_CR1_DIR;
   TIM2->PSC = SystemCoreClock/10000-1;   // 0.1ms
 
   RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;    
   TIM3->CR1 = 0; 
   TIM3->PSC = SystemCoreClock/10000-1;   // 0.1ms  
+  TIM3->ARR =  1000;  // 100ms
+  NVIC_SetPriority(TIM3_IRQn, SYSTEM_INTERRUTPS_PRIORITY_BASE);
   NVIC_EnableIRQ(TIM3_IRQn);
-  NVIC_SetPriority(TIM3_IRQn, 0);  
 
   delay_ms(1);  
   RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN;
@@ -242,7 +193,14 @@ void zbs_prog_init()
   INIT_MISO_IN 
   INIT_PWR
   PWR_H  
-}
+  
+  // walkaround
+  TimeoutFlag  = 0;
+  start_timeout();  // dummy timeout
+  while (TimeoutFlag  == 0) asm("nop");
+  TimeoutFlag  = 0;
+}  
+
 
 
 uint8_t at_cmd_rx_state = 0; // can be reset by timer
@@ -467,7 +425,10 @@ typedef enum
   CMD_ERASE_INFOBLOCK = 27,
   CMD_SAVE_MAC_FROM_FW = 40,
   CMD_PASS_THROUGH = 50,
+  CMD_PRG_TIMEOUT = 60,  
 } ZBS_UART_PROTO;
+
+
 
 void handle_uart_cmd(uint8_t cmd, uint8_t len)
 {
@@ -557,6 +518,15 @@ void handle_uart_cmd(uint8_t cmd, uint8_t len)
       data = *rx_buff_point++;
       if (data != 0xff)
       {
+        /*
+        zbs_write_flash(address, data);
+        if (zbs_read_flash(address)!=data)  
+        {
+          error = 1;
+          break;
+        }       
+        */
+
         j = 3;
         error = 1;
         while(j--)
@@ -569,6 +539,7 @@ void handle_uart_cmd(uint8_t cmd, uint8_t len)
           }
         }
         if (error) break;
+        
       }
       address++;
     }
@@ -604,32 +575,40 @@ void zbs_prog_process_input(const void *buf, size_t count)
 
   static uint16_t CRC_calc;
   static uint16_t CRC_in;
-  static uint8_t at_cmd = 0;
+  static uint8_t at_cmd; 
   static uint8_t expected_len;
   static uint8_t curr_data_pos;
-
   const uint8_t *buf_p = buf;
-
 
 
   while (count--)
   {
-    uint8_t curr_char = *buf_p;
+    uint8_t curr_char = *buf_p++;
+
 
     switch (at_cmd_rx_state)
     {
     case 0:
-      if (curr_char == 'A') 
+      if(TimeoutFlag)
+      {
+        TimeoutFlag=0;
+        at_tx_buffer[4] = 0;
+        send_at_answer(CMD_PRG_TIMEOUT, 1);
+      }
+      if (curr_char == 'A') at_cmd_rx_state++;
+      break;
+    case 1:
+      if (curr_char == 'T') 
       {
         at_cmd_rx_state++;
         curr_data_pos = 0;
-        CRC_calc = 0xAB34;        
+        CRC_calc = 0xAB34;              
         start_timeout();  // start timer here!!
       }
-      break;
-    case 1:
-      if (curr_char == 'T') at_cmd_rx_state++;
-      else                  at_cmd_rx_state = 0;
+      else 
+      {
+        if (curr_char != 'A') at_cmd_rx_state = 0;
+      }
       break;
     case 2:
       at_cmd = curr_char; // Receive current CMD
@@ -653,28 +632,32 @@ void zbs_prog_process_input(const void *buf, size_t count)
       break;
     case 6:
       CRC_in |= curr_char;
-      TIM3->DIER &= ~TIM_DIER_UIE;  
-      TIM3->CR1  &= ~TIM_CR1_CEN ;        
+      TIM3->SR = 0;  // reset flags      
+      TIM3->DIER = 0;  // ~TIM_DIER_UIE;  
+      TIM3->CR1  = 0;   // ~TIM_CR1_CEN ;        
       if (CRC_calc == CRC_in) handle_uart_cmd(at_cmd, expected_len);
       at_cmd_rx_state = 0;
       break;
     default:
       break;
     }
-    buf_p++;
     //  cdc_shell_write_string(cdc_shell_prompt);
   }
 }
 
 
-void TIM3_IRQHandler(void) 
+
+//timeout
+
+void TIM3_IRQHandler() 
 {
-  TIM3->SR = 0;
-  TIM3->SR &= ~TIM_SR_UIF; 
-  TIM3->DIER &= ~TIM_DIER_UIE;  
-  TIM3->CR1  &= ~TIM_CR1_CEN ;   
+  TIM3->SR = 0;  // reset flags
+  TIM3->DIER = 0;  // ~TIM_DIER_UIE;  
+  TIM3->CR1  = 0; // ~TIM_CR1_CEN ;   
   at_cmd_rx_state = 0;
+  TimeoutFlag  = 1;
 }
+
 
 /*
 void zbs_prog_process_input(const void *buf, size_t count)

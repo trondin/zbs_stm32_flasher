@@ -16,10 +16,10 @@ int main() {
     system_clock_init();
     system_interrupts_init();
     //device_config_init();
-    zbs_prog_init();    
+    //zbs_prog_init();    
     status_led_init();
     usb_init();
-//    zbs_prog_init();       
+    zbs_prog_init();   
     while (1) {
         usb_poll();
     }
